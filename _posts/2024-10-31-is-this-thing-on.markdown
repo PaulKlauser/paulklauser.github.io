@@ -2,7 +2,6 @@
 layout: post
 title:  "Is this thing on?"
 date:   2024-10-31 20:40:00 -0400
-categories: jekyll update
 ---
 
 For a long time, I've wanted to start blogging, it seems like it's what all the "cool kids" in my industry do, but who has the time?

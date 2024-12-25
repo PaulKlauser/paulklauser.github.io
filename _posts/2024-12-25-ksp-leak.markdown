@@ -1,0 +1,41 @@
+---
+layout: post
+title:  "A Shaky Foundation:\nDebugging KSP Memory Leaks"
+date:   2024-12-24 20:40:00 -0400
+published: false
+---
+
+You trust your compiler, right? It's easy to think that issues in your build are your own fault. Truth is: you're building software on top of a mountain of other software, and every piece of it is fallible. It's built by humans, for humans, and humans make mistakes. I hope to arm you with the right questions and tools to help diagnose if the problem is in _your_ code, or your _tooling's_.
+ 
+In an effort to tune my project's build performance, I'd been leveraging the [gradle-profiler](https://github.com/gradle/gradle-profiler) (a tool worth looking at, but not really the point of this article). In its benchmarks it will run a series of builds and record the time each one takes, averaging them out to increase accuracy. I noticed our builds were consistently running out of memory on the second build, and without looking extremely closely, it was easy to miss that wrapped inside this `OutOfMemoryError`, was a _metaspace_ error.
+
+![Image](/images/oom_metaspace.png)
+
+Looking over our build configuration, our heap space cap is a fairly generous 10GB, but our metaspace cap was set to only 1GB. Having recently read an [article from Jason Pearson](https://www.jasonpearson.dev/metaspace-in-jvm-builds/) about why setting the metaspace cap was both no longer needed, and often detrimental, I removed the metaspace cap, our benchmarking worked, and I went on my way.
+ 
+Sitting with this a little more, I wondered if the metaspace cap was really the problem, or if I had just band-aided over a real issue. After all, why didn't our build fail on the first pass?
+ 
+Hungry for more information, I started googling around about metaspace leaks relating to Gradle. Misery loves company, and I found a lot of helpful information across a few issues in YouTrack by searching for memory leaks: [KT-55831](https://youtrack.jetbrains.com/issue/KT-55831), [KT-46744](https://youtrack.jetbrains.com/issue/KT-46744/Memory-Leaks-in-Kotlin-daemon), [KT-32521](https://youtrack.jetbrains.com/issue/KT-32521/Metaspace-leak-in-the-compiler-daemon). Most notably, I saw that the authors were sharing graphs of both heap and metaspace use, which had apparently come from a free tool: [VisualVM](https://visualvm.github.io/). VisualVM attaches to a running Java process and can tell you all sorts of useful information about it: what JVM flags it's running with, what its heap usage is, and most importantly for me, what it's metaspace usage is.
+
+<br>
+
+![Image](/images/metaspace_profile.png)
+
+<h3 style="text-align:center;">Blue, like the water that’s leaking into your ship</h3>
+
+<br>
+
+Because VisualVM shows you all of the Java processes on your machine, it also helped me see that when you're compiling Kotlin, you have both a Gradle process running, and also the Kotlin compiler process. Either one could cause your build trouble, so it's worth being aware of both. Looking at the Kotlin Compile Daemon revealed that its metaspace usage was steadily increasing between each subsequent build. Not good!
+
+I went ahead and reproduced the issue with [Now In Android](https://github.com/android/nowinandroid), figuring in the best case, I could reproduce it there, and then get some smarter people to help me, since NIA is a public project. Fortunately, running subsequent builds over there led me to the same conclusion: something inside of the Kotlin Compiler was leaking memory.
+ 
+The next question was: what? Having assessed memory leaks within Android apps, I had a mild understanding of the process here: take a heap dump, parse through it, look for types that are seemingly piling up, and look at what's holding a reference to them.
+ 
+At first I tried using VisualVMs heap analysis tool, but to me it was like looking through soup. I then found some recommendations to try [Eclipse's Memory Analyzer Tool](https://eclipse.dev/mat/) or "MAT". I gave it a shot, including its "Leak Suspects" feature, which automatically analyzes the heap dump to point out which objects are likely leaked.
+
+![Image](/images/mat.png)
+
+Lo and behold, MAT pointed me to two suspects: URLClassLoader and AppClassLoader, the former referenced by KSP, and the latter referenced by the Kotlin compiler itself.
+ 
+Feeling like I was just about at the end of my helpfulness, I took this information to the community, hopeful that someone with more experience in this area could corroborate my findings, and maybe have some insights into a fix…
+
